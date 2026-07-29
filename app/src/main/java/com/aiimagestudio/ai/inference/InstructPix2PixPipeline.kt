@@ -48,7 +48,12 @@ class InstructPix2PixPipeline @Inject constructor(
             component = ModelComponent.SD15_VAE_ENCODER,
             precision = settings.precision,
             inputs = mapOf(
-                "pixel_values" to (imageTensor to longArrayOf(1, 3, settings.height.toLong(), settings.width.toLong()))
+                // The Optimum/Diffusers ONNX export names the VAE encoder's
+                // input tensor "sample" (not "pixel_values" — that was wrong
+                // and caused ONNX Runtime to reject the input at inference
+                // time with "Unknown input name pixel_values, expected one
+                // of [sample]").
+                "sample" to (imageTensor to longArrayOf(1, 3, settings.height.toLong(), settings.width.toLong()))
             )
         )
         engine.maybeUnloadForLowRam(ModelComponent.SD15_VAE_ENCODER, settings.memoryMode)
