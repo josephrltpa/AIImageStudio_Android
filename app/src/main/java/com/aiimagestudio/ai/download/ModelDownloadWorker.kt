@@ -12,6 +12,7 @@ import com.aiimagestudio.domain.model.ModelComponent
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -192,27 +193,43 @@ class ModelDownloadWorker @AssistedInject constructor(
         partialFile.renameTo(finalFile)
     }
 
+    /**
+     * Runs after PauseRequested is thrown, which happens right after
+     * WorkManager.cancelUniqueWork() cancels this worker's coroutine Job.
+     * Because the Job is already cancelled at this point, a normal suspend
+     * call here (e.g. the Room DAO write) would hit its first suspension
+     * point and immediately throw CancellationException — silently
+     * skipping the write and leaving isDownloading = true forever, which
+     * is why paused downloads used to get stuck with no Resume button.
+     * Wrapping in NonCancellable lets this cleanup write complete even
+     * though the surrounding Job has been cancelled.
+     */
     private suspend fun markPaused(component: ModelComponent) {
-        val existing = modelDao.get(component.name)
-        modelDao.upsert(
-            (existing ?: ModelEntity(component = component.name)).copy(
-                isDownloading = false,
-                isPaused = true
+        withContext(NonCancellable) {
+            val existing = modelDao.get(component.name)
+            modelDao.upsert(
+                (existing ?: ModelEntity(component = component.name)).copy(
+                    isDownloading = false,
+                    isPaused = true
+                )
             )
-        )
+        }
     }
 
+    /** Same NonCancellable guard as markPaused, defensively — see its comment. */
     private suspend fun markFailed(component: ModelComponent, errorMessage: String) {
-        val existing = modelDao.get(component.name)
-        modelDao.upsert(
-            (existing ?: ModelEntity(component = component.name)).copy(
-                isDownloading = false,
-                isPaused = false,
-                isInstalled = false,
-                downloadProgress = 0f,
-                bytesDownloaded = 0,
-                lastError = errorMessage
+        withContext(NonCancellable) {
+            val existing = modelDao.get(component.name)
+            modelDao.upsert(
+                (existing ?: ModelEntity(component = component.name)).copy(
+                    isDownloading = false,
+                    isPaused = false,
+                    isInstalled = false,
+                    downloadProgress = 0f,
+                    bytesDownloaded = 0,
+                    lastError = errorMessage
+                )
             )
-        )
+        }
     }
 }
