@@ -40,12 +40,14 @@ class ModelRepositoryImpl @Inject constructor(
         downloadManager.cancel(component)
         val model = ModelCatalog.find(component)
         storageManager.delete(model.localFileName)
+        model.dataLocalFileName?.let { storageManager.delete(it) }
         modelDao.delete(component.name)
     }
 
     override suspend fun deleteModel(component: ModelComponent) {
         val model = ModelCatalog.find(component)
         storageManager.delete(model.localFileName)
+        model.dataLocalFileName?.let { storageManager.delete(it) }
         modelDao.delete(component.name)
     }
 
@@ -53,7 +55,17 @@ class ModelRepositoryImpl @Inject constructor(
         val model = ModelCatalog.find(component)
         val file = storageManager.fileFor(model.localFileName)
         if (!file.exists()) return false
-        return storageManager.sha256Of(file).equals(model.sha256, ignoreCase = true)
+        if (model.sha256.isNotBlank() && !storageManager.sha256Of(file).equals(model.sha256, ignoreCase = true)) {
+            return false
+        }
+        if (model.hasSeparateDataFile) {
+            val dataFile = storageManager.fileFor(model.dataLocalFileName!!)
+            if (!dataFile.exists()) return false
+            if (model.dataSha256.isNotBlank() &&
+                !storageManager.sha256Of(dataFile).equals(model.dataSha256, ignoreCase = true)
+            ) return false
+        }
+        return true
     }
 
     override suspend fun availableStorageBytes(): Long = storageManager.availableBytes()

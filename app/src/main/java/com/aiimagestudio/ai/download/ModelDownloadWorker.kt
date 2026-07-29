@@ -8,6 +8,7 @@ import androidx.work.workDataOf
 import com.aiimagestudio.data.local.db.ModelDao
 import com.aiimagestudio.data.local.db.ModelEntity
 import com.aiimagestudio.data.storage.ModelStorageManager
+import com.aiimagestudio.domain.model.AIModel
 import com.aiimagestudio.domain.model.ModelComponent
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -15,17 +16,23 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
 import java.io.RandomAccessFile
 
 /**
- * Downloads a single model component in the background using HTTP Range
- * requests so it can be paused/resumed/retried without restarting from
- * zero. Runs under WorkManager so downloads survive process death and
- * respect system constraints (network availability, battery).
+ * Downloads a model component in the background using HTTP Range requests
+ * so it can be paused/resumed/retried without restarting from zero. Runs
+ * under WorkManager so downloads survive process death and respect system
+ * constraints (network availability, battery).
  *
- * Pause is implemented by simply cancelling the WorkManager job (the
- * partial ".part" file is preserved); Resume re-enqueues this same worker,
- * which detects the partial file and continues from its byte offset.
+ * Some components (e.g. the SD 1.5 UNet, split across model.onnx +
+ * model.onnx_data because it exceeds 2GB) require TWO files. Both are
+ * downloaded sequentially into the same on-device folder; overall progress
+ * reported to the UI is weighted across both by byte count.
+ *
+ * Pause is implemented by cancelling the WorkManager job (partial ".part"
+ * files are preserved on disk); Resume re-enqueues this same worker, which
+ * detects partial files and continues from their byte offsets.
  */
 @HiltWorker
 class ModelDownloadWorker @AssistedInject constructor(
@@ -47,68 +54,33 @@ class ModelDownloadWorker @AssistedInject constructor(
         val component = ModelComponent.valueOf(componentName)
         val model = ModelCatalog.find(component)
 
-        val partialFile = storageManager.partialFileFor(model.localFileName)
-        val finalFile = storageManager.fileFor(model.localFileName)
-        val startOffset = if (partialFile.exists()) partialFile.length() else 0L
-
         try {
-            markDownloading(component, startOffset, model.sizeBytes)
+            val totalBytes = model.totalBytes.coerceAtLeast(1)
+            var bytesDoneBeforeThisFile = 0L
 
-            val request = Request.Builder()
-                .url(model.downloadUrl)
-                .header("Range", "bytes=$startOffset-")
-                .build()
+            // Primary file (the .onnx graph, or the only file for single-file components).
+            downloadOne(
+                url = model.downloadUrl,
+                localFileName = model.localFileName,
+                component = component,
+                totalBytes = totalBytes,
+                bytesOffsetInTotal = bytesDoneBeforeThisFile,
+                expectedSha256 = model.sha256
+            )
+            bytesDoneBeforeThisFile += model.sizeBytes
 
-            httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    return@withContext Result.retry()
-                }
-                val body = response.body ?: return@withContext Result.retry()
-
-                RandomAccessFile(partialFile, "rw").use { raf ->
-                    raf.seek(startOffset)
-                    body.byteStream().use { input ->
-                        val buffer = ByteArray(1 * 1024 * 1024)
-                        var totalRead = startOffset
-                        var lastReportedPercent = -1
-                        while (true) {
-                            if (isStopped) return@withContext Result.failure() // paused
-                            val read = input.read(buffer)
-                            if (read == -1) break
-                            raf.write(buffer, 0, read)
-                            totalRead += read
-
-                            val percent = ((totalRead * 100) / model.sizeBytes).toInt()
-                            if (percent != lastReportedPercent) {
-                                lastReportedPercent = percent
-                                setProgressAsync(
-                                    workDataOf(KEY_PROGRESS to totalRead.toFloat() / model.sizeBytes)
-                                )
-                                modelDao.upsert(
-                                    ModelEntity(
-                                        component = component.name,
-                                        isInstalled = false,
-                                        downloadProgress = totalRead.toFloat() / model.sizeBytes,
-                                        isDownloading = true,
-                                        isPaused = false,
-                                        bytesDownloaded = totalRead
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
+            // Optional secondary file (e.g. model.onnx_data, or merges.txt for the tokenizer).
+            if (model.hasSeparateDataFile) {
+                downloadOne(
+                    url = model.dataDownloadUrl!!,
+                    localFileName = model.dataLocalFileName!!,
+                    component = component,
+                    totalBytes = totalBytes,
+                    bytesOffsetInTotal = bytesDoneBeforeThisFile,
+                    expectedSha256 = model.dataSha256
+                )
             }
 
-            // Validate checksum before promoting the .part file to final.
-            val actualSha = storageManager.sha256Of(partialFile)
-            if (!actualSha.equals(model.sha256, ignoreCase = true)) {
-                partialFile.delete()
-                markFailed(component)
-                return@withContext Result.failure()
-            }
-
-            partialFile.renameTo(finalFile)
             modelDao.upsert(
                 ModelEntity(
                     component = component.name,
@@ -116,39 +88,101 @@ class ModelDownloadWorker @AssistedInject constructor(
                     downloadProgress = 1f,
                     isDownloading = false,
                     isPaused = false,
-                    bytesDownloaded = model.sizeBytes,
-                    localUri = finalFile.absolutePath
+                    bytesDownloaded = totalBytes,
+                    localUri = storageManager.fileFor(model.localFileName).absolutePath
                 )
             )
             Result.success()
+        } catch (t: PauseRequested) {
+            Result.failure() // paused: partial ".part" files are left on disk for resume
+        } catch (t: ChecksumMismatch) {
+            markFailed(component)
+            Result.failure()
         } catch (t: Throwable) {
-            // Network hiccup: leave the .part file in place so a retry/resume
-            // can continue from where it left off.
-            markPaused(component, partialFile.length())
+            markPaused(component)
             Result.retry()
         }
     }
 
-    private suspend fun markDownloading(component: ModelComponent, bytes: Long, total: Long) {
-        modelDao.upsert(
-            ModelEntity(
-                component = component.name,
-                isInstalled = false,
-                downloadProgress = bytes.toFloat() / total,
-                isDownloading = true,
-                isPaused = false,
-                bytesDownloaded = bytes
-            )
-        )
+    private class PauseRequested : Exception()
+    private class ChecksumMismatch : Exception()
+
+    /** Downloads a single file with Range-resume support, reporting weighted progress against [totalBytes]. */
+    private suspend fun downloadOne(
+        url: String,
+        localFileName: String,
+        component: ModelComponent,
+        totalBytes: Long,
+        bytesOffsetInTotal: Long,
+        expectedSha256: String
+    ) {
+        val partialFile = storageManager.partialFileFor(localFileName)
+        val finalFile = storageManager.fileFor(localFileName)
+        if (finalFile.exists()) return // already downloaded (e.g. resuming after the 2nd file failed)
+
+        val startOffset = if (partialFile.exists()) partialFile.length() else 0L
+
+        val request = Request.Builder()
+            .url(url)
+            .header("Range", "bytes=$startOffset-")
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code} for $url")
+            val body = response.body ?: throw java.io.IOException("Empty response body for $url")
+
+            RandomAccessFile(partialFile, "rw").use { raf ->
+                raf.seek(startOffset)
+                body.byteStream().use { input ->
+                    val buffer = ByteArray(1 * 1024 * 1024)
+                    var totalRead = startOffset
+                    var lastReportedPercent = -1
+                    while (true) {
+                        if (isStopped) throw PauseRequested()
+                        val read = input.read(buffer)
+                        if (read == -1) break
+                        raf.write(buffer, 0, read)
+                        totalRead += read
+
+                        val overallBytes = bytesOffsetInTotal + totalRead
+                        val percent = ((overallBytes * 100) / totalBytes).toInt()
+                        if (percent != lastReportedPercent) {
+                            lastReportedPercent = percent
+                            val fraction = overallBytes.toFloat() / totalBytes
+                            setProgressAsync(workDataOf(KEY_PROGRESS to fraction))
+                            modelDao.upsert(
+                                ModelEntity(
+                                    component = component.name,
+                                    isInstalled = false,
+                                    downloadProgress = fraction,
+                                    isDownloading = true,
+                                    isPaused = false,
+                                    bytesDownloaded = overallBytes
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (expectedSha256.isNotBlank()) {
+            val actualSha = storageManager.sha256Of(partialFile)
+            if (!actualSha.equals(expectedSha256, ignoreCase = true)) {
+                partialFile.delete()
+                throw ChecksumMismatch()
+            }
+        }
+
+        partialFile.renameTo(finalFile)
     }
 
-    private suspend fun markPaused(component: ModelComponent, bytes: Long) {
+    private suspend fun markPaused(component: ModelComponent) {
         val existing = modelDao.get(component.name)
         modelDao.upsert(
             (existing ?: ModelEntity(component = component.name)).copy(
                 isDownloading = false,
-                isPaused = true,
-                bytesDownloaded = bytes
+                isPaused = true
             )
         )
     }

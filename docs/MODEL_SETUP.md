@@ -1,5 +1,22 @@
 # Model Setup: converting SD 1.5 / InstructPix2Pix to ONNX
 
+## Update: pre-converted files are now wired up directly — you likely don't need this guide
+
+`ai/download/ModelCatalog.kt` now points directly at two public,
+already-converted ONNX model repositories, so the conversion steps below
+are a **fallback**, not a requirement:
+
+- SD 1.5 components: https://huggingface.co/modularai/stable-diffusion-1.5-onnx
+- InstructPix2Pix components: https://huggingface.co/TensorStack/Instruct-pix2pix-onnx
+
+These are community conversions, not officially published by the original
+model authors — reasonable to trust for personal/offline use, but review
+them yourself if that matters for your use case. If you'd rather convert
+from the original checkpoints yourself (e.g. for provenance, or to bake in
+your own fine-tune), follow the steps below.
+
+---
+
 The app's inference engine (`ai/inference/OnnxInferenceEngine.kt`) loads
 `.onnx` graphs via ONNX Runtime Mobile. Stable Diffusion 1.5 and
 InstructPix2Pix are distributed by their authors as PyTorch / SafeTensors

@@ -81,7 +81,7 @@ private fun ModelRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        "%.0f MB".format(model.sizeBytes / (1024.0 * 1024.0)),
+                        "%.0f MB".format(model.totalBytes / (1024.0 * 1024.0)),
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

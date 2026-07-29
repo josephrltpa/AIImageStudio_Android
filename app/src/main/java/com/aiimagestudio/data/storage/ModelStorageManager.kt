@@ -21,9 +21,9 @@ class ModelStorageManager @Inject constructor(
     val modelsDir: File
         get() = File(context.filesDir, "models").apply { mkdirs() }
 
-    fun fileFor(localFileName: String): File = File(modelsDir, localFileName)
+    fun fileFor(localFileName: String): File = File(modelsDir, localFileName).also { it.parentFile?.mkdirs() }
 
-    fun partialFileFor(localFileName: String): File = File(modelsDir, "$localFileName.part")
+    fun partialFileFor(localFileName: String): File = File(modelsDir, "$localFileName.part").also { it.parentFile?.mkdirs() }
 
     fun exists(localFileName: String): Boolean = fileFor(localFileName).exists()
 
