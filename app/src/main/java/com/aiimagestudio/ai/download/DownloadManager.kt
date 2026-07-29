@@ -35,7 +35,7 @@ class DownloadManager @Inject constructor(
 
         workManager.enqueueUniqueWork(
             uniqueWorkName(component),
-            ExistingWorkPolicy.KEEP,
+            ExistingWorkPolicy.REPLACE,
             request
         )
     }
