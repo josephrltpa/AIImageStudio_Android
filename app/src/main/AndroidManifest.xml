@@ -36,6 +36,23 @@
             </intent-filter>
         </activity>
 
+        <!-- WorkManager + Hilt custom worker factory require WorkManager to
+             initialize ON-DEMAND (the first time WorkManager.getInstance()
+             is actually called) rather than automatically at app startup.
+             The default auto-initializer runs before Hilt has injected our
+             HiltWorkerFactory into AIImageStudioApp, which silently breaks
+             every background download without any visible error. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup.InitializationProvider"
+                tools:node="remove" />
+        </provider>
+
         <!-- FileProvider for sharing generated images -->
         <provider
             android:name="androidx.core.content.FileProvider"
