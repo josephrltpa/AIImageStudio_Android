@@ -26,7 +26,8 @@ data class AIModel(
     val isInstalled: Boolean = false,
     val downloadProgress: Float = 0f,
     val isDownloading: Boolean = false,
-    val isPaused: Boolean = false
+    val isPaused: Boolean = false,
+    val lastError: String? = null
 ) {
     val hasSeparateDataFile: Boolean get() = dataDownloadUrl != null
     val totalBytes: Long get() = sizeBytes + dataSizeBytes

@@ -100,6 +100,15 @@ private fun ModelRow(
                     style = MaterialTheme.typography.labelLarge
                 )
             }
+
+            if (!model.lastError.isNullOrBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Download failed: ${model.lastError}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
         }
     }
 }

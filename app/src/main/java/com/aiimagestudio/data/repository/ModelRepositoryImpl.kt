@@ -28,7 +28,8 @@ class ModelRepositoryImpl @Inject constructor(
                     isInstalled = entity?.isInstalled ?: false,
                     downloadProgress = entity?.downloadProgress ?: 0f,
                     isDownloading = entity?.isDownloading ?: false,
-                    isPaused = entity?.isPaused ?: false
+                    isPaused = entity?.isPaused ?: false,
+                    lastError = entity?.lastError
                 )
             }
         }

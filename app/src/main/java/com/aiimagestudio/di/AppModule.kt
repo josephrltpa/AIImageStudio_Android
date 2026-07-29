@@ -37,5 +37,14 @@ object AppModule {
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        .addInterceptor { chain ->
+            // A handful of CDNs (Hugging Face included) are stricter about
+            // requests carrying no/unusual User-Agent headers. This makes
+            // model downloads behave like an ordinary app/browser request.
+            val requestWithUa = chain.request().newBuilder()
+                .header("User-Agent", "AIImageStudio-Android/1.0 (+https://github.com)")
+                .build()
+            chain.proceed(requestWithUa)
+        }
         .build()
 }

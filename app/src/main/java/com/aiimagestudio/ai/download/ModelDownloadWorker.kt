@@ -8,7 +8,6 @@ import androidx.work.workDataOf
 import com.aiimagestudio.data.local.db.ModelDao
 import com.aiimagestudio.data.local.db.ModelEntity
 import com.aiimagestudio.data.storage.ModelStorageManager
-import com.aiimagestudio.domain.model.AIModel
 import com.aiimagestudio.domain.model.ModelComponent
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -16,7 +15,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.io.File
 import java.io.RandomAccessFile
 
 /**
@@ -30,9 +28,9 @@ import java.io.RandomAccessFile
  * downloaded sequentially into the same on-device folder; overall progress
  * reported to the UI is weighted across both by byte count.
  *
- * Pause is implemented by cancelling the WorkManager job (partial ".part"
- * files are preserved on disk); Resume re-enqueues this same worker, which
- * detects partial files and continues from their byte offsets.
+ * Every failure path records a human-readable message into
+ * ModelEntity.lastError so the Model Manager screen can show *why* a
+ * download failed instead of silently resetting the button.
  */
 @HiltWorker
 class ModelDownloadWorker @AssistedInject constructor(
@@ -54,11 +52,23 @@ class ModelDownloadWorker @AssistedInject constructor(
         val component = ModelComponent.valueOf(componentName)
         val model = ModelCatalog.find(component)
 
+        // Clear any previous error and mark as actively downloading right away,
+        // so the UI shows progress immediately instead of looking frozen.
+        modelDao.upsert(
+            ModelEntity(
+                component = component.name,
+                isInstalled = false,
+                downloadProgress = 0f,
+                isDownloading = true,
+                isPaused = false,
+                lastError = null
+            )
+        )
+
         try {
             val totalBytes = model.totalBytes.coerceAtLeast(1)
             var bytesDoneBeforeThisFile = 0L
 
-            // Primary file (the .onnx graph, or the only file for single-file components).
             downloadOne(
                 url = model.downloadUrl,
                 localFileName = model.localFileName,
@@ -69,7 +79,6 @@ class ModelDownloadWorker @AssistedInject constructor(
             )
             bytesDoneBeforeThisFile += model.sizeBytes
 
-            // Optional secondary file (e.g. model.onnx_data, or merges.txt for the tokenizer).
             if (model.hasSeparateDataFile) {
                 downloadOne(
                     url = model.dataDownloadUrl!!,
@@ -94,13 +103,17 @@ class ModelDownloadWorker @AssistedInject constructor(
             )
             Result.success()
         } catch (t: PauseRequested) {
-            Result.failure() // paused: partial ".part" files are left on disk for resume
+            markPaused(component)
+            Result.failure()
         } catch (t: ChecksumMismatch) {
-            markFailed(component)
+            markFailed(component, "Downloaded file didn't match its expected checksum.")
             Result.failure()
         } catch (t: Throwable) {
-            markPaused(component)
-            Result.retry()
+            // Record the real exception so it's visible in the Model Manager UI —
+            // network errors, HTTP error codes, disk-space issues, etc.
+            val message = "${t::class.simpleName}: ${t.message ?: "no details"}"
+            markFailed(component, message)
+            Result.failure()
         }
     }
 
@@ -128,8 +141,10 @@ class ModelDownloadWorker @AssistedInject constructor(
             .build()
 
         httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code} for $url")
-            val body = response.body ?: throw java.io.IOException("Empty response body for $url")
+            if (!response.isSuccessful) {
+                throw java.io.IOException("HTTP ${response.code} ${response.message} for ${url.substringAfterLast('/')}")
+            }
+            val body = response.body ?: throw java.io.IOException("Empty response body for ${url.substringAfterLast('/')}")
 
             RandomAccessFile(partialFile, "rw").use { raf ->
                 raf.seek(startOffset)
@@ -187,7 +202,7 @@ class ModelDownloadWorker @AssistedInject constructor(
         )
     }
 
-    private suspend fun markFailed(component: ModelComponent) {
+    private suspend fun markFailed(component: ModelComponent, errorMessage: String) {
         val existing = modelDao.get(component.name)
         modelDao.upsert(
             (existing ?: ModelEntity(component = component.name)).copy(
@@ -195,7 +210,8 @@ class ModelDownloadWorker @AssistedInject constructor(
                 isPaused = false,
                 isInstalled = false,
                 downloadProgress = 0f,
-                bytesDownloaded = 0
+                bytesDownloaded = 0,
+                lastError = errorMessage
             )
         )
     }

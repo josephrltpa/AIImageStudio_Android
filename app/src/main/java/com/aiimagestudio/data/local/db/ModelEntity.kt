@@ -11,5 +11,6 @@ data class ModelEntity(
     val isDownloading: Boolean = false,
     val isPaused: Boolean = false,
     val bytesDownloaded: Long = 0,
-    val localUri: String? = null
+    val localUri: String? = null,
+    val lastError: String? = null
 )
