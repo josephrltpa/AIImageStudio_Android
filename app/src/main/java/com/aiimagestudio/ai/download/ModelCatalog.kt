@@ -1,110 +1,105 @@
-package com.aiimagestudio.ai.inference
+package com.aiimagestudio.ai.download
 
-import android.graphics.Bitmap
-import com.aiimagestudio.domain.model.GenerationJob
-import com.aiimagestudio.domain.model.GenerationSettings
+import com.aiimagestudio.domain.model.AIModel
 import com.aiimagestudio.domain.model.ModelComponent
-import kotlinx.coroutines.flow.FlowCollector
-import java.nio.FloatBuffer
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
- * Implements InstructPix2Pix: an input photo plus a natural-language
- * instruction ("make the sky sunset orange") produces an edited photo.
+ * Declares where every model component comes from and how to validate it.
  *
- * Pipeline (matches the architecture diagram in the product spec):
- *   input image -> VAE encode -> latents
- *   instruction -> tokenizer -> text encoder -> embeddings
- *   [latents, embeddings, timestep] -> InstructPix2Pix UNet, looped over
- *     [GenerationSettings.steps] denoising steps via [DiffusionScheduler]
- *   final latents -> VAE decode -> output bitmap
+ * These URLs point at real, already-converted ONNX weights hosted publicly
+ * on Hugging Face — no local PyTorch conversion step is required:
+ *  - SD 1.5 components: https://huggingface.co/modularai/stable-diffusion-1.5-onnx
+ *  - InstructPix2Pix UNet: https://huggingface.co/ForserX/instruct-pix2pix-onnx
+ *    (TensorStack/Instruct-pix2pix-onnx is gated/private and returns HTTP 401
+ *    for anonymous downloads — ForserX's repo is public and ships the UNet
+ *    as a single sub-2GB model.onnx, so no dataDownloadUrl split is needed.
+ *    Only the UNet is pulled from this repo; text/vae encoders + vae decoder
+ *    still come from the SD 1.5 repo above since IP2P was fine-tuned from
+ *    stock SD 1.5 and shares its latent space / CLIP encoder.)
  *
- * InstructPix2Pix's UNet is additionally conditioned on the *original*
- * image latents at every step (concatenated on the channel axis) — this is
- * what lets it preserve the subject while only applying the requested edit.
+ * SHA-256 hashes below are intentionally blank: Hugging Face doesn't
+ * surface them on the file browser page for LFS/xet-backed files, so
+ * checksum verification is skipped for entries with a blank sha256 (see
+ * ModelRepositoryImpl.verifyModel / ModelDownloadWorker). If you want
+ * verification, download a file once, run `sha256sum <file>` (or
+ * `certutil -hashfile <file> SHA256` on Windows), and paste the result in.
+ *
+ * The SD 1.5 UNet is split into a tiny graph file (model.onnx) plus a
+ * separate ~3.4GB weights file (model.onnx_data) because it exceeds the
+ * 2GB single-file ONNX protobuf limit — see the dataDownloadUrl fields
+ * below. Both files download into the same on-device folder so ONNX
+ * Runtime can find them together automatically.
  */
-@Singleton
-class InstructPix2PixPipeline @Inject constructor(
-    private val engine: OnnxInferenceEngine,
-    private val tokenizer: TextTokenizer
-) {
-    private val latentChannels = 4
-    private val vaeScaleFactor = 8 // SD VAE downsamples spatial dims by 8x
+object ModelCatalog {
 
-    suspend fun run(
-        collector: FlowCollector<GenerationJob>,
-        inputImage: Bitmap,
-        instruction: String,
-        settings: GenerationSettings
-    ): Bitmap {
-        collector.emit(GenerationJob.Preprocessing("Encoding input image…"))
-        val latentH = settings.height / vaeScaleFactor
-        val latentW = settings.width / vaeScaleFactor
+    private const val SD15_BASE = "https://huggingface.co/modularai/stable-diffusion-1.5-onnx/resolve/main"
+    private const val IP2P_BASE = "https://huggingface.co/ForserX/instruct-pix2pix-onnx/resolve/main"
 
-        // 1. Encode the source image into latent space via the VAE encoder.
-        val imageTensor = ImageTensorConverter.bitmapToNchwTensor(inputImage, settings.width, settings.height)
-        val (imageLatentsBuf, _) = engine.runFloatOutput(
-            component = ModelComponent.SD15_VAE_ENCODER,
-            precision = settings.precision,
-            inputs = mapOf(
-                // The Optimum/Diffusers ONNX export names the VAE encoder's
-                // input tensor "sample" (not "pixel_values" — that was wrong
-                // and caused ONNX Runtime to reject the input at inference
-                // time with "Unknown input name pixel_values, expected one
-                // of [sample]").
-                "sample" to (imageTensor to longArrayOf(1, 3, settings.height.toLong(), settings.width.toLong()))
-            )
-        )
-        engine.maybeUnloadForLowRam(ModelComponent.SD15_VAE_ENCODER, settings.memoryMode)
-        val imageLatents = FloatArray(imageLatentsBuf.remaining()).also { imageLatentsBuf.get(it) }
-
-        // 2. Tokenize + encode the instruction text.
-        collector.emit(GenerationJob.Preprocessing("Encoding instruction…"))
-        val tokenIds = tokenizer.encode(instruction)
-        val (textEmbeddingBuf, textEmbeddingShape) = engine.runTextEncoder(tokenIds)
-        engine.maybeUnloadForLowRam(ModelComponent.SD15_TEXT_ENCODER, settings.memoryMode)
-        val textEmbedding = FloatArray(textEmbeddingBuf.remaining()).also { textEmbeddingBuf.get(it) }
-
-        // 3. Initialize random latents (the "canvas" the UNet will denoise).
-        val scheduler = DiffusionScheduler(settings.scheduler, settings.steps, settings.seed)
-        var latents = scheduler.initialNoise(latentChannels * latentH * latentW)
-
-        // 4. Iterative denoising loop, conditioned each step on [latents, imageLatents, textEmbedding].
-        for (stepIndex in scheduler.timesteps.indices) {
-            collector.emit(GenerationJob.Denoising(stepIndex + 1, settings.steps))
-
-            val unetInputChannels = FloatArray(latents.size + imageLatents.size)
-            System.arraycopy(latents, 0, unetInputChannels, 0, latents.size)
-            System.arraycopy(imageLatents, 0, unetInputChannels, latents.size, imageLatents.size)
-
-            val (noisePredBuf, _) = engine.runFloatOutput(
-                component = ModelComponent.INSTRUCT_PIX2PIX_UNET,
-                precision = settings.precision,
-                inputs = mapOf(
-                    "sample" to (FloatBuffer.wrap(unetInputChannels) to longArrayOf(
-                        1, (latentChannels * 2).toLong(), latentH.toLong(), latentW.toLong()
-                    )),
-                    "encoder_hidden_states" to (FloatBuffer.wrap(textEmbedding) to textEmbeddingShape),
-                    "timestep" to (FloatBuffer.wrap(floatArrayOf(scheduler.timesteps[stepIndex].toFloat())) to longArrayOf(1))
-                )
-            )
-            val predictedNoise = FloatArray(noisePredBuf.remaining()).also { noisePredBuf.get(it) }
-            latents = scheduler.step(latents, predictedNoise, stepIndex)
-        }
-        engine.maybeUnloadForLowRam(ModelComponent.INSTRUCT_PIX2PIX_UNET, settings.memoryMode)
-
-        // 5. Decode final latents back to pixel space.
-        collector.emit(GenerationJob.Decoding("Decoding image…"))
-        val (decodedBuf, _) = engine.runFloatOutput(
+    fun all(): List<AIModel> = listOf(
+        AIModel(
+            component = ModelComponent.SD15_TOKENIZER,
+            displayName = "SD 1.5 Tokenizer",
+            description = "CLIP BPE vocabulary + merges used to tokenize prompts.",
+            sizeBytes = 1_060_000, // vocab.json
+            sha256 = "",
+            downloadUrl = "$SD15_BASE/tokenizer/vocab.json",
+            localFileName = "tokenizer_vocab.json",
+            // merges.txt piggybacks on the same catalog entry as a "data file"
+            // purely as a download-pairing mechanism (not a split ONNX graph).
+            dataDownloadUrl = "$SD15_BASE/tokenizer/merges.txt",
+            dataLocalFileName = "tokenizer_merges.txt",
+            dataSizeBytes = 525_000
+        ),
+        AIModel(
+            component = ModelComponent.SD15_TEXT_ENCODER,
+            displayName = "SD 1.5 Text Encoder (CLIP)",
+            description = "Encodes the prompt into embeddings that condition the UNet.",
+            sizeBytes = 493_000_000,
+            sha256 = "",
+            downloadUrl = "$SD15_BASE/text_encoder/model.onnx",
+            localFileName = "sd15_text_encoder/model.onnx"
+        ),
+        AIModel(
+            component = ModelComponent.SD15_UNET,
+            displayName = "SD 1.5 UNet",
+            description = "The denoising network — the largest and slowest component.",
+            sizeBytes = 1_210_000, // model.onnx (graph only)
+            sha256 = "",
+            downloadUrl = "$SD15_BASE/unet/model.onnx",
+            localFileName = "sd15_unet/model.onnx",
+            dataDownloadUrl = "$SD15_BASE/unet/model.onnx_data",
+            dataLocalFileName = "sd15_unet/model.onnx_data",
+            dataSizeBytes = 3_440_000_000
+        ),
+        AIModel(
             component = ModelComponent.SD15_VAE_DECODER,
-            precision = settings.precision,
-            inputs = mapOf(
-                "latent_sample" to (FloatBuffer.wrap(latents) to longArrayOf(1, latentChannels.toLong(), latentH.toLong(), latentW.toLong()))
-            )
+            displayName = "SD 1.5 VAE Decoder",
+            description = "Converts denoised latents back into a pixel image.",
+            sizeBytes = 198_000_000,
+            sha256 = "",
+            downloadUrl = "$SD15_BASE/vae_decoder/model.onnx",
+            localFileName = "sd15_vae_decoder/model.onnx"
+        ),
+        AIModel(
+            component = ModelComponent.SD15_VAE_ENCODER,
+            displayName = "SD 1.5 VAE Encoder",
+            description = "Encodes an input photo into the latent space InstructPix2Pix edits.",
+            sizeBytes = 137_000_000,
+            sha256 = "",
+            downloadUrl = "$SD15_BASE/vae_encoder/model.onnx",
+            localFileName = "sd15_vae_encoder/model.onnx"
+        ),
+        AIModel(
+            component = ModelComponent.INSTRUCT_PIX2PIX_UNET,
+            displayName = "InstructPix2Pix UNet",
+            description = "Instruction-conditioned denoiser for natural-language photo edits.",
+            sizeBytes = 1_720_000_000,
+            sha256 = "",
+            downloadUrl = "$IP2P_BASE/unet/model.onnx",
+            localFileName = "ip2p_unet/model.onnx"
         )
-        engine.maybeUnloadForLowRam(ModelComponent.SD15_VAE_DECODER, settings.memoryMode)
+    )
 
-        return ImageTensorConverter.nchwTensorToBitmap(decodedBuf, settings.width, settings.height)
-    }
+    fun find(component: ModelComponent): AIModel =
+        all().first { it.component == component }
 }
