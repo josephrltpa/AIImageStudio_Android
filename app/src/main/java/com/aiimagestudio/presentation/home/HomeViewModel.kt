@@ -26,7 +26,8 @@ data class HomeUiState(
     val progressFraction: Float = 0f,
     val resultBitmap: Bitmap? = null,
     val errorMessage: String? = null,
-    val lastSavedImageId: Long? = null
+    val lastSavedImageId: Long? = null,
+    val saveMessage: String? = null
 )
 
 /**
@@ -107,5 +108,20 @@ class HomeViewModel @Inject constructor(
 
     fun dismissError() {
         _uiState.value = _uiState.value.copy(errorMessage = null)
+    }
+
+    /** Copies the current result into the device's public Photos gallery (see ImageStorageManager.saveToGallery). */
+    fun saveCurrentResultToGallery() {
+        val bitmap = _uiState.value.resultBitmap ?: return
+        viewModelScope.launch {
+            val success = imageStorageManager.saveToGallery(bitmap)
+            _uiState.value = _uiState.value.copy(
+                saveMessage = if (success) "Saved to gallery" else "Couldn't save image"
+            )
+        }
+    }
+
+    fun dismissSaveMessage() {
+        _uiState.value = _uiState.value.copy(saveMessage = null)
     }
 }
