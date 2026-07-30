@@ -23,6 +23,7 @@ class StableDiffusionPipeline @Inject constructor(
 ) {
     private val latentChannels = 4
     private val vaeScaleFactor = 8
+    private val vaeScalingFactor = 0.18215f // SD1.5 VAE's trained latent scaling_factor
 
     suspend fun run(
         collector: FlowCollector<GenerationJob>,
@@ -59,11 +60,18 @@ class StableDiffusionPipeline @Inject constructor(
         engine.maybeUnloadForLowRam(ModelComponent.SD15_UNET, settings.memoryMode)
 
         collector.emit(GenerationJob.Decoding("Decoding image…"))
+        // SD1.5's VAE was trained with encoder outputs multiplied by
+        // vaeScalingFactor (0.18215); decoding requires inverting that
+        // scaling first. Skipping this feeds the decoder latents ~5.5x too
+        // large — completely outside its trained input distribution —
+        // which produces garbage/noise-looking output (see the same fix
+        // and comment in InstructPix2PixPipeline.kt).
+        val scaledLatents = FloatArray(latents.size) { i -> latents[i] / vaeScalingFactor }
         val (decodedBuf, _) = engine.runFloatOutput(
             component = ModelComponent.SD15_VAE_DECODER,
             precision = settings.precision,
             inputs = mapOf(
-                "latent_sample" to (FloatBuffer.wrap(latents) to longArrayOf(1, latentChannels.toLong(), latentH.toLong(), latentW.toLong()))
+                "latent_sample" to (FloatBuffer.wrap(scaledLatents) to longArrayOf(1, latentChannels.toLong(), latentH.toLong(), latentW.toLong()))
             )
         )
         engine.maybeUnloadForLowRam(ModelComponent.SD15_VAE_DECODER, settings.memoryMode)
