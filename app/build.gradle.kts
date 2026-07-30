@@ -28,6 +28,22 @@ android {
         }
     }
 
+    signingConfigs {
+        // Committed on purpose — this is only the DEBUG key (never used for
+        // Play Store releases), and it must be identical across every build
+        // (local machine and every GitHub Actions run) or Android refuses
+        // in-place updates with "package conflicts with an existing package."
+        // Without this block, AGP falls back to its own default debug config,
+        // which GitHub Actions regenerates fresh on every run since each job
+        // gets a brand-new VM with no cached ~/.android/debug.keystore.
+        getByName("debug") {
+            storeFile = rootProject.file("keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -40,6 +56,7 @@ android {
         debug {
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
