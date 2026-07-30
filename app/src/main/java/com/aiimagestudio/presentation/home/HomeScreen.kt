@@ -3,6 +3,7 @@ package com.aiimagestudio.presentation.home
 import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.MediaStore
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -42,6 +43,13 @@ fun HomeScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
+
+    LaunchedEffect(state.saveMessage) {
+        state.saveMessage?.let { message ->
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            viewModel.dismissSaveMessage()
+        }
+    }
 
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
@@ -142,7 +150,7 @@ fun HomeScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    OutlinedButton(onClick = { /* already saved automatically on success */ }, modifier = Modifier.weight(1f)) {
+                    OutlinedButton(onClick = { viewModel.saveCurrentResultToGallery() }, modifier = Modifier.weight(1f)) {
                         Icon(Icons.Filled.Save, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
                         Text(stringResource(R.string.save))
