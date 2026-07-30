@@ -64,7 +64,14 @@ class TextTokenizer @Inject constructor(
         }
         tokenIds += vocab!![END_TOKEN] ?: 49407
 
-        val padded = IntArray(MAX_TOKENS) { 0 }
+        // CLIP's text encoder was trained with padding done using the
+        // end-of-text token id repeated (id 0 is a real vocab entry, not a
+        // blank/pad token) — padding with 0 fed the encoder a sequence like
+        // "<start> blue cap </end> ! ! ! ..." for most of the 77 slots,
+        // which corrupted the embeddings via self-attention and produced
+        // garbage conditioning for the UNet on every step.
+        val padId = vocab!![END_TOKEN] ?: 49407
+        val padded = IntArray(MAX_TOKENS) { padId }
         for (i in tokenIds.indices) {
             if (i >= MAX_TOKENS) break
             padded[i] = tokenIds[i]
