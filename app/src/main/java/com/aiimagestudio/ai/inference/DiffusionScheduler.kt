@@ -1,97 +1,142 @@
-package com.aiimagestudio.ai.inference
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("com.google.dagger.hilt.android")
+    id("org.jetbrains.kotlin.kapt")
+    id("com.google.devtools.ksp")
+    id("kotlin-parcelize")
+    id("org.jetbrains.kotlin.plugin.serialization")
+}
 
-import com.aiimagestudio.domain.model.Scheduler
-import kotlin.math.exp
-import kotlin.math.ln
-import kotlin.random.Random
+android {
+    namespace = "com.aiimagestudio"
+    compileSdk = 34
 
-/**
- * Produces the noise-schedule (sigmas / alphas_cumprod) and per-step update
- * rule for the denoising loop. Implements the standard SD 1.5 linear-beta
- * schedule (beta_start=0.00085, beta_end=0.012, 1000 training steps),
- * subsampled down to [numInferenceSteps].
- *
- * Only the algorithms needed for this app are implemented: DDIM
- * (deterministic, reproducible with a seed) and Euler Ancestral
- * (stochastic, often sharper results). PNDM is exposed in settings for
- * future extension but currently falls back to DDIM stepping.
- */
-class DiffusionScheduler(
-    private val type: Scheduler,
-    private val numInferenceSteps: Int,
-    seed: Long?
-) {
-    private val random = Random(seed ?: System.nanoTime())
+    defaultConfig {
+        applicationId = "com.aiimagestudio"
+        // Requirement: Android 10+ (API 29)
+        minSdk = 29
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0.0"
 
-    private val betaStart = 0.00085
-    private val betaEnd = 0.012
-    private val numTrainTimesteps = 1000
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-    private val alphasCumprod: DoubleArray = run {
-        val betas = DoubleArray(numTrainTimesteps) { i ->
-            val t = i / (numTrainTimesteps - 1).toDouble()
-            val sqrtB = kotlin.math.sqrt(betaStart) + t * (kotlin.math.sqrt(betaEnd) - kotlin.math.sqrt(betaStart))
-            sqrtB * sqrtB
+        ndk {
+            // Only build for 64-bit ARM per target-device requirement.
+            abiFilters += listOf("arm64-v8a")
         }
-        val alphas = betas.map { 1.0 - it }
-        val cumProd = DoubleArray(numTrainTimesteps)
-        var running = 1.0
-        for (i in alphas.indices) {
-            running *= alphas[i]
-            cumProd[i] = running
+    }
+
+    signingConfigs {
+        // Committed on purpose — this is only the DEBUG key (never used for
+        // Play Store releases), and it must be identical across every build
+        // (local machine and every GitHub Actions run) or Android refuses
+        // in-place updates with "package conflicts with an existing package."
+        // Without this block, AGP falls back to its own default debug config,
+        // which GitHub Actions regenerates fresh on every run since each job
+        // gets a brand-new VM with no cached ~/.android/debug.keystore.
+        getByName("debug") {
+            storeFile = rootProject.file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
         }
-        cumProd
     }
 
-    /** The training timesteps to actually run, evenly spaced and reversed (high noise -> low noise). */
-    val timesteps: IntArray = run {
-        val step = numTrainTimesteps / numInferenceSteps
-        IntArray(numInferenceSteps) { i -> (numTrainTimesteps - 1) - i * step }.also { it.reverse().let { } }
-            .let { arr -> IntArray(numInferenceSteps) { i -> arr[numInferenceSteps - 1 - i] } }
-    }
-
-    /** Initial latent noise, scaled appropriately for the first timestep. */
-    fun initialNoise(size: Int): FloatArray {
-        val initSigma = sigmaFor(timesteps.first())
-        return FloatArray(size) { (random.nextGaussian() * initSigma).toFloat() }
-    }
-
-    fun sigmaFor(timestep: Int): Double {
-        val acp = alphasCumprod[timestep.coerceIn(0, numTrainTimesteps - 1)]
-        return kotlin.math.sqrt((1 - acp) / acp)
-    }
-
-    /**
-     * Applies one denoising step given the UNet's predicted noise.
-     * latents_(t-1) = step(latents_t, predicted_noise, t)
-     */
-    fun step(latents: FloatArray, predictedNoise: FloatArray, stepIndex: Int): FloatArray {
-        val t = timesteps[stepIndex]
-        val acpT = alphasCumprod[t.coerceIn(0, numTrainTimesteps - 1)]
-        val prevT = if (stepIndex + 1 < timesteps.size) timesteps[stepIndex + 1] else -1
-        val acpPrev = if (prevT >= 0) alphasCumprod[prevT] else 1.0
-
-        val out = FloatArray(latents.size)
-        for (i in latents.indices) {
-            // Predict x0 from noise, then re-noise to the previous timestep (DDIM update rule).
-            val predOriginal = (latents[i] - kotlin.math.sqrt(1 - acpT).toFloat() * predictedNoise[i]) /
-                kotlin.math.sqrt(acpT).toFloat()
-            val dirToXt = kotlin.math.sqrt(1 - acpPrev).toFloat() * predictedNoise[i]
-            out[i] = kotlin.math.sqrt(acpPrev).toFloat() * predOriginal + dirToXt
-
-            if (type == Scheduler.EULER_A && prevT >= 0) {
-                // Ancestral sampling: inject a controlled amount of fresh noise for stochasticity.
-                val sigmaUp = kotlin.math.sqrt((1 - acpPrev) / (1 - acpT) * (1 - acpT / acpPrev))
-                out[i] += (random.nextGaussian() * sigmaUp).toFloat()
-            }
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
-        return out
+        debug {
+            isMinifyEnabled = false
+            applicationIdSuffix = ".debug"
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 
-    private fun Random.nextGaussian(): Double {
-        // Box-Muller transform (kotlin.random has no built-in Gaussian sampler).
-        val u1 = nextDouble().coerceAtLeast(1e-9)
-        val u2 = nextDouble()
-        return kotlin.math.sqrt(-2.0 * ln(u1)) * kotlin.math.cos(2.0 * Math.PI * u2)
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            // onnxruntime ships native .so files per-ABI; keep only arm64-v8a
+            pickFirsts += "**/libc++_shared.so"
+        }
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.14"
+    }
+}
+
+dependencies {
+    // Core / Compose
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
+    implementation("androidx.activity:activity-compose:1.9.1")
+    implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.navigation:navigation-compose:2.7.7")
+
+    // Hilt (Dependency Injection)
+    implementation("com.google.dagger:hilt-android:2.51.1")
+    kapt("com.google.dagger:hilt-android-compiler:2.51.1")
+    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
+    implementation("androidx.hilt:hilt-work:1.2.0")
+    kapt("androidx.hilt:hilt-compiler:1.2.0")
+
+    // Room (Database)
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    kapt("androidx.room:room-compiler:2.6.1")
+
+    // WorkManager (background downloads / inference jobs)
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
+    // DataStore (lightweight settings persistence)
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    // Coil (image loading)
+    implementation("io.coil-kt:coil-compose:2.6.0")
+
+    // ONNX Runtime Mobile — on-device inference engine (no cloud, no Python)
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+
+    // Kotlin coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // OkHttp — used only by the Model Manager for resumable HTTP(S) downloads
+    // of model weights. No other network calls exist anywhere in the app.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Kotlinx Serialization — used by TextTokenizer to parse vocab.json
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+
+    // Testing
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 }
