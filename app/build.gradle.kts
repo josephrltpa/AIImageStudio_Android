@@ -37,7 +37,7 @@ android {
         // which GitHub Actions regenerates fresh on every run since each job
         // gets a brand-new VM with no cached ~/.android/debug.keystore.
         getByName("debug") {
-            storeFile = rootProject.file("keystore/debug.keystore")
+            storeFile = rootProject.file("debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
