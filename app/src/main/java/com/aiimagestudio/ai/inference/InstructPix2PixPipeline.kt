@@ -102,7 +102,7 @@ class InstructPix2PixPipeline @Inject constructor(
         // scaling first. Skipping this fed the decoder latents ~5.5x too
         // large — completely outside its trained input distribution —
         // which is what was producing garbage/noise-looking output here.
-        val scaledLatents = FloatArray(latents.size) { i -> latents[i] / vaeScalingFactor }
+        // val scaledLatents = FloatArray(latents.size) { i -> latents[i] / vaeScalingFactor }
         val (decodedBuf, _) = engine.runFloatOutput(
             component = ModelComponent.SD15_VAE_DECODER,
             precision = settings.precision,
