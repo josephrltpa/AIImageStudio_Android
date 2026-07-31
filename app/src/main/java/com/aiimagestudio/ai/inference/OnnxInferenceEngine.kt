@@ -46,10 +46,18 @@ class OnnxInferenceEngine @Inject constructor(
             lock.withLock {
                 sessions[component]?.let { return@withContext it }
 
-                val modelFile = com.aiimagestudio.ai.download.ModelCatalog.find(component).localFileName
-                val file = storageManager.fileFor(modelFile)
-                require(file.exists()) {
-                    "Model '$modelFile' is not installed. Download it from the Model Manager first."
+                val model = com.aiimagestudio.ai.download.ModelCatalog.find(component)
+                val file = storageManager.fileFor(model.localFileName)
+                require(storageManager.isValidModelFile(model.localFileName, model.sizeBytes)) {
+                    "Model '${model.localFileName}' is missing or incomplete (expected ~${model.sizeBytes} bytes" +
+                        if (file.exists()) ", found ${file.length()}). Delete it in Model Manager and redownload."
+                        else "). Download it from the Model Manager first."
+                }
+                if (model.hasSeparateDataFile) {
+                    require(storageManager.isValidModelFile(model.dataLocalFileName!!, model.dataSizeBytes)) {
+                        "Model data file '${model.dataLocalFileName}' is missing or incomplete. " +
+                            "Delete '${model.localFileName}' in Model Manager and redownload both files."
+                    }
                 }
 
                 val options = OrtSession.SessionOptions().apply {
