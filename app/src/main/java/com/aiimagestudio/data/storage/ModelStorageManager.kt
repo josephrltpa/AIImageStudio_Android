@@ -27,6 +27,26 @@ class ModelStorageManager @Inject constructor(
 
     fun exists(localFileName: String): Boolean = fileFor(localFileName).exists()
 
+    /**
+     * Existence isn't enough: a stub/placeholder file, a truncated download
+     * that somehow ended up under the final filename, or a Hugging Face LFS
+     * pointer file (a ~130-byte text file returned instead of the real
+     * binary when a request doesn't get proxied to actual LFS storage) all
+     * pass [exists] while being nowhere near a real, complete model weight
+     * file. Since every entry in ModelCatalog ships with a blank sha256
+     * (Hugging Face doesn't expose one for LFS/xet files — see the comment
+     * there), a loose size check is the only integrity signal available
+     * without re-downloading. A real download's size should match
+     * [expectedSizeBytes] almost exactly; anything under 95% of it is
+     * treated as not actually installed.
+     */
+    fun isValidModelFile(localFileName: String, expectedSizeBytes: Long): Boolean {
+        val file = fileFor(localFileName)
+        if (!file.exists()) return false
+        if (expectedSizeBytes <= 0) return true // unknown expected size, fall back to existence only
+        return file.length() >= (expectedSizeBytes * 0.95).toLong()
+    }
+
     fun delete(localFileName: String) {
         fileFor(localFileName).delete()
         partialFileFor(localFileName).delete()
