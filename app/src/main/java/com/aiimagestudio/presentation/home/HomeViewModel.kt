@@ -8,6 +8,7 @@ import com.aiimagestudio.data.storage.ImageStorageManager
 import com.aiimagestudio.domain.model.GenerationJob
 import com.aiimagestudio.domain.model.GenerationMode
 import com.aiimagestudio.domain.model.GenerationSettings
+import com.aiimagestudio.domain.repository.InferenceRepository
 import com.aiimagestudio.domain.usecase.GenerateImageUseCase
 import com.aiimagestudio.domain.usecase.SaveGeneratedImageUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -27,7 +28,11 @@ data class HomeUiState(
     val resultBitmap: Bitmap? = null,
     val errorMessage: String? = null,
     val lastSavedImageId: Long? = null,
-    val saveMessage: String? = null
+    val saveMessage: String? = null,
+    // Whether every ONNX component required by `mode` is downloaded. Starts
+    // true (rather than false) so the UI doesn't flash a "not ready" banner
+    // before the first check completes; the real value lands moments later.
+    val isModelReady: Boolean = true
 )
 
 /**
@@ -40,11 +45,30 @@ class HomeViewModel @Inject constructor(
     private val generateImageUseCase: GenerateImageUseCase,
     private val saveGeneratedImageUseCase: SaveGeneratedImageUseCase,
     private val settingsDataStore: SettingsDataStore,
-    private val imageStorageManager: ImageStorageManager
+    private val imageStorageManager: ImageStorageManager,
+    private val inferenceRepository: InferenceRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
+
+    init {
+        refreshModelReadiness()
+    }
+
+    /**
+     * Re-checks whether `mode`'s required ONNX files are on disk. Called on
+     * init and whenever the mode changes, so the Generate button and the
+     * "not ready" banner reflect reality *before* the person taps Generate,
+     * rather than only failing after the fact.
+     */
+    private fun refreshModelReadiness() {
+        val mode = _uiState.value.mode
+        viewModelScope.launch {
+            val ready = inferenceRepository.isReady(mode)
+            _uiState.value = _uiState.value.copy(isModelReady = ready)
+        }
+    }
 
     fun onImageSelected(bitmap: Bitmap) {
         _uiState.value = _uiState.value.copy(
@@ -52,6 +76,7 @@ class HomeViewModel @Inject constructor(
             // Selecting an image implies the edit flow, matching the product UX.
             mode = GenerationMode.INSTRUCT_PIX2PIX_EDIT
         )
+        refreshModelReadiness()
     }
 
     fun onPromptChanged(text: String) {
@@ -60,11 +85,17 @@ class HomeViewModel @Inject constructor(
 
     fun onModeChanged(mode: GenerationMode) {
         _uiState.value = _uiState.value.copy(mode = mode)
+        refreshModelReadiness()
+    }
+
+    /** Call when returning to this screen (e.g. from Model Manager) so a fresh download is picked up. */
+    fun onScreenResumed() {
+        refreshModelReadiness()
     }
 
     fun generate() {
         val state = _uiState.value
-        if (state.prompt.isBlank() || state.isGenerating) return
+        if (state.prompt.isBlank() || state.isGenerating || !state.isModelReady) return
 
         viewModelScope.launch {
             val settings: GenerationSettings = settingsDataStore.current()
