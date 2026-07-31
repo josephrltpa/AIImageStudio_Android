@@ -43,6 +43,17 @@ fun HomeScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                viewModel.onScreenResumed()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(state.saveMessage) {
         state.saveMessage?.let { message ->
@@ -115,10 +126,41 @@ fun HomeScreen(
                 onSelected = viewModel::onModeChanged
             )
 
+            // --- "Not ready" banner: tells the person up front that this
+            // mode's model files aren't downloaded, instead of letting them
+            // tap Generate and get a confusing result. ---
+            if (!state.isModelReady) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Filled.ErrorOutline,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            "Models for this mode aren't downloaded yet.",
+                            modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        TextButton(onClick = onOpenModelManager) {
+                            Text("Download")
+                        }
+                    }
+                }
+            }
+
             // --- Generate ---
             Button(
                 onClick = viewModel::generate,
-                enabled = !state.isGenerating && state.prompt.isNotBlank(),
+                enabled = !state.isGenerating && state.prompt.isNotBlank() && state.isModelReady,
                 modifier = Modifier.fillMaxWidth().height(52.dp)
             ) {
                 if (state.isGenerating) {
