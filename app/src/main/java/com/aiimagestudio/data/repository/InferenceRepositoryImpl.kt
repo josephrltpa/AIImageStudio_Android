@@ -68,8 +68,12 @@ class InferenceRepositoryImpl @Inject constructor(
             )
         }
         return required.all { component ->
-            val fileName = com.aiimagestudio.ai.download.ModelCatalog.find(component).localFileName
-            modelStorageManager.exists(fileName)
+            val model = com.aiimagestudio.ai.download.ModelCatalog.find(component)
+            val primaryOk = modelStorageManager.isValidModelFile(model.localFileName, model.sizeBytes)
+            val dataOk = if (model.hasSeparateDataFile) {
+                modelStorageManager.isValidModelFile(model.dataLocalFileName!!, model.dataSizeBytes)
+            } else true
+            primaryOk && dataOk
         }
     }
 
